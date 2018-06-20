@@ -9,12 +9,12 @@
 package org.openhab.binding.coolmasternet.handler;
 
 import static org.openhab.binding.coolmasternet.CoolMasterNetBindingConstants.*;
-import static org.openhab.binding.coolmasternet.internal.config.CoolMasterNetConfiguration.*;
 
 import java.util.HashMap;
 import java.util.Map;
 
-import org.eclipse.smarthome.config.core.Configuration;
+import org.eclipse.jdt.annotation.NonNullByDefault;
+import org.eclipse.jdt.annotation.Nullable;
 import org.eclipse.smarthome.core.library.types.DecimalType;
 import org.eclipse.smarthome.core.library.types.OnOffType;
 import org.eclipse.smarthome.core.library.types.StringType;
@@ -28,6 +28,8 @@ import org.eclipse.smarthome.core.types.Command;
 import org.eclipse.smarthome.core.types.RefreshType;
 import org.openhab.binding.coolmasternet.internal.ControllerHandler;
 import org.openhab.binding.coolmasternet.internal.ControllerHandler.CoolMasterClientError;
+import org.openhab.binding.coolmasternet.internal.config.ControllerConfiguration;
+import org.openhab.binding.coolmasternet.internal.config.HVACConfiguration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -35,27 +37,32 @@ import org.slf4j.LoggerFactory;
  * The {@link HVACHandler} is responsible for handling commands for a single
  * HVAC unit (a single UID on a CoolMasterNet controller.)
  *
- * @author Angus Gratton
+ * @author Angus Gratton - Initial contribution
  */
+@NonNullByDefault
 public class HVACHandler extends BaseThingHandler {
 
-    private Logger logger = LoggerFactory.getLogger(HVACHandler.class);
-    private ControllerHandler controller;
+    private final Logger logger = LoggerFactory.getLogger(HVACHandler.class);
 
     public HVACHandler(Thing thing) {
         super(thing);
     }
 
+    private @Nullable ControllerHandler getControllerHandler() {
+        return (ControllerHandler) getBridge().getHandler();
+    }
+
     @Override
     public void handleCommand(ChannelUID channelUID, Command command) {
-        Configuration config = this.getConfig();
-        String uid = (String) config.get(UID);
+        String uid = getConfigAs(HVACConfiguration.class).uid;
         String channel = channelUID.getId();
+        ControllerHandler controller = getControllerHandler();
 
         try {
-            if (!controller.isConnected()) {
-                updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR, String
-                        .format("Could not connect to CoolMasterNet unit %s:%d", config.get(HOST), config.get(PORT)));
+            if (controller == null || !controller.isConnected()) {
+                ControllerConfiguration config = getBridge().getConfiguration().as(ControllerConfiguration.class);
+                updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR,
+                        String.format("Could not connect to CoolMasterNet unit %s:%d", config.host, config.port));
             } else {
                 if (channel.endsWith(ON) && command instanceof OnOffType) {
                     OnOffType onoff = (OnOffType) command;
@@ -66,7 +73,7 @@ public class HVACHandler extends BaseThingHandler {
                 } else if (channel.endsWith(MODE) && command instanceof StringType) {
                     /* the mode value in the command is the actual CoolMasterNet protocol command */
                     controller.sendCommand(String.format("%s %s", command, uid));
-                } else if (channel.endsWith(FAN) && command instanceof StringType) {
+                } else if (channel.endsWith(FAN_SPEED) && command instanceof StringType) {
                     controller.sendCommand(String.format("fspeed %s %s", uid, command));
                 } else if (channel.endsWith(LOUVRE) && command instanceof StringType) {
                     controller.sendCommand(String.format("swing %s %s", uid, command));
@@ -83,42 +90,44 @@ public class HVACHandler extends BaseThingHandler {
     public void initialize() {
         logger.debug("Initialising CoolMasterNet HVAC handler...");
         updateStatus(ThingStatus.ONLINE);
-        controller = (ControllerHandler) getBridge().getHandler();
     }
 
     /* Update this HVAC unit's properties from the controller */
     public void refresh() {
-        ThingUID thinguid = getThing().getUID();
+        ThingUID thingUID = getThing().getUID();
 
         String on = query("o");
         if (on != null) {
-            updateState(new ChannelUID(thinguid, ON), "1".equals(on) ? OnOffType.ON : OnOffType.OFF);
+            updateState(new ChannelUID(thingUID, ON), "1".equals(on) ? OnOffType.ON : OnOffType.OFF);
         }
-        updateState(new ChannelUID(thinguid, CURRENT_TEMP), new DecimalType(query("a")));
-        updateState(new ChannelUID(thinguid, SET_TEMP), new DecimalType(query("t")));
-        String mode = modeNumToStr.get(query("m"));
+        updateState(new ChannelUID(thingUID, CURRENT_TEMP), new DecimalType(query("a")));
+        updateState(new ChannelUID(thingUID, SET_TEMP), new DecimalType(query("t")));
+        String mode = MODE_NUM_TO_STR.get(query("m"));
         if (mode != null) {
-            updateState(new ChannelUID(thinguid, MODE), new StringType(mode));
+            updateState(new ChannelUID(thingUID, MODE), new StringType(mode));
         }
         String louvre = query("s");
         if (louvre != null) {
-            updateState(new ChannelUID(thinguid, LOUVRE), new StringType(louvre));
+            updateState(new ChannelUID(thingUID, LOUVRE), new StringType(louvre));
         }
-        String fan = fanNumToStr.get(query("f"));
+        String fan = FAN_NUM_TO_STR.get(query("f"));
         if (fan != null) {
-            updateState(new ChannelUID(thinguid, FAN), new StringType(fan));
+            updateState(new ChannelUID(thingUID, FAN_SPEED), new StringType(fan));
         }
     }
 
-    private String query(String query_char) {
-        String cmn_uid = (String) getConfig().get(UID);
-        String command = String.format("query %s %s", cmn_uid, query_char);
-        try {
-            return controller.sendCommand(command);
-        } catch (CoolMasterClientError e) {
-            logger.error("Query {} failed: {}", command, e.getMessage());
-            return null; /* passing back null sets an invalid value on the channel */
+    private @Nullable String query(String queryChar) {
+        String uid = getConfigAs(HVACConfiguration.class).uid;
+        String command = String.format("query %s %s", uid, queryChar);
+        ControllerHandler controller = getControllerHandler();
+        if (controller != null) {
+            try {
+                return controller.sendCommand(command);
+            } catch (CoolMasterClientError e) {
+                logger.error("Query {} failed: {}", command, e.getMessage());
+            }
         }
+        return null; /* passing back null sets an invalid value on the channel */
     }
 
     /*
@@ -126,16 +135,16 @@ public class HVACHandler extends BaseThingHandler {
      * but these don't map to any mode you can set on the device, so we use this
      * lookup table.
      */
-    private static final Map<String, String> modeNumToStr;
+    private static final Map<String, @Nullable String> MODE_NUM_TO_STR;
     static {
-        modeNumToStr = new HashMap<>();
-        modeNumToStr.put("0", "cool");
-        modeNumToStr.put("1", "heat");
-        modeNumToStr.put("2", "auto");
-        modeNumToStr.put("3", "dry");
+        MODE_NUM_TO_STR = new HashMap<>();
+        MODE_NUM_TO_STR.put("0", "cool");
+        MODE_NUM_TO_STR.put("1", "heat");
+        MODE_NUM_TO_STR.put("2", "auto");
+        MODE_NUM_TO_STR.put("3", "dry");
         /* 4=='haux' but this mode doesn't have an equivalent command to set it! */
-        modeNumToStr.put("4", "heat");
-        modeNumToStr.put("5", "fan");
+        MODE_NUM_TO_STR.put("4", "heat");
+        MODE_NUM_TO_STR.put("5", "fan");
     }
 
     /*
@@ -143,13 +152,13 @@ public class HVACHandler extends BaseThingHandler {
      * for fan speed, but the protocol's fan command (& matching
      * binding command) use single-letter abbreviations.
      */
-    private static final Map<String, String> fanNumToStr;
+    private static final Map<String, @Nullable String> FAN_NUM_TO_STR;
     static {
-        fanNumToStr = new HashMap<>();
-        fanNumToStr.put("0", "l"); /* Low */
-        fanNumToStr.put("1", "m"); /* Medium */
-        fanNumToStr.put("2", "h"); /* High */
-        fanNumToStr.put("3", "a"); /* Auto */
-        fanNumToStr.put("4", "t"); /* Top */
+        FAN_NUM_TO_STR = new HashMap<>();
+        FAN_NUM_TO_STR.put("0", "l"); /* Low */
+        FAN_NUM_TO_STR.put("1", "m"); /* Medium */
+        FAN_NUM_TO_STR.put("2", "h"); /* High */
+        FAN_NUM_TO_STR.put("3", "a"); /* Auto */
+        FAN_NUM_TO_STR.put("4", "t"); /* Top */
     }
 }
